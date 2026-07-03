@@ -1,8 +1,5 @@
 # AI Purchase Order Matching & Invoice Validation
 
-> **Round 3 Technical Assignment — Task 2** · Built with **n8n + OpenAI (`gpt-4.1-nano`) + Airtable**
-> 🎥 **Demo video:** *(link added at submission)* · 📦 **Repo:** https://github.com/Shubham00-3/ai-po-matching-invoice-validation
-
 An end-to-end AI procurement workflow: supplier invoices arrive by **email**, are
 **extracted with an LLM**, **validated against their approved Purchase Order by a
 deterministic matching engine**, checked for **discrepancies**, and routed to
