@@ -1,0 +1,59 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 842] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>
+endobj
+4 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>
+endobj
+5 0 obj
+<< /Length 1092 >>
+stream
+BT
+/F1 9 Tf
+10.8 TL
+36 806 Td
+(CASCADE INDUSTRIAL COMPONENTS INC.) Tj T*
+(4400 Willow Rd, Portland, OR 97205, USA) Tj T*
+(EIN: 47-1234567) Tj T*
+() Tj T*
+(INVOICE) Tj T*
+() Tj T*
+(Invoice Number:   CIC-88231) Tj T*
+(Invoice Date:     2026-06-22) Tj T*
+(Due Date:         2026-07-22) Tj T*
+(Purchase Order:   PO-2002) Tj T*
+() Tj T*
+(------------------------------------------------------------------) Tj T*
+(SKU          Description                     Qty   Unit     Amount) Tj T*
+(------------------------------------------------------------------) Tj T*
+(CI-BRG-608   Ball Bearing 608ZZ \(pack/100\)    80   42.00    3,360.00) Tj T*
+(CI-BLT-M8    Hex Bolt M8x40 \(pack of 200\)     30   31.00      930.00) Tj T*
+(------------------------------------------------------------------) Tj T*
+(                                Net Amount:            4,290.00) Tj T*
+(                                Tax \(0%\):                  0.00) Tj T*
+(                                Gross Amount:          4,290.00) Tj T*
+() Tj T*
+(Currency: USD) Tj T*
+(Remit to IBAN: US64 SVBK MXXX 1234 5678 90) Tj T*
+ET
+endstream
+endobj
+xref
+0 6
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000115 00000 n 
+0000000241 00000 n 
+0000000309 00000 n 
+trailer
+<< /Size 6 /Root 1 0 R >>
+startxref
+1453
+%%EOF

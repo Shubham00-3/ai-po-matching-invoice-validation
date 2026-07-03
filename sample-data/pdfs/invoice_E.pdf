@@ -1,0 +1,59 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 842] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>
+endobj
+4 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>
+endobj
+5 0 obj
+<< /Length 1183 >>
+stream
+BT
+/F1 9 Tf
+10.8 TL
+36 806 Td
+(NORTHWIND OFFICE SUPPLIES LTD.) Tj T*
+(120 Front Street West, Toronto, ON M5J 1E3, Canada) Tj T*
+() Tj T*
+(INVOICE) Tj T*
+() Tj T*
+(Invoice Number:   INV-NW-4501) Tj T*
+(Invoice Date:     2026-06-18) Tj T*
+(Due Date:         2026-07-18) Tj T*
+(Purchase Order:   PO-2001) Tj T*
+() Tj T*
+(------------------------------------------------------------------) Tj T*
+(SKU          Description                          Qty  Unit    Amount) Tj T*
+(------------------------------------------------------------------) Tj T*
+(NW-PAP-A4    A4 Premium Paper, 80gsm \(case/5\)      40  32.50   1,300.00) Tj T*
+(NW-TNR-58A   Toner Cartridge 58A \(black\)           12  95.00   1,140.00) Tj T*
+(NW-PEN-BLK   Gel Pens, black \(box of 50\)           20  18.00     360.00) Tj T*
+(------------------------------------------------------------------) Tj T*
+(                                       Net Amount:          2,800.00) Tj T*
+(                                       HST \(13%\):             364.00) Tj T*
+(                                       Gross Amount:        3,164.00) Tj T*
+() Tj T*
+(Currency: CAD) Tj T*
+(Remit to IBAN: CA89 3704 0044 0532 0130 00) Tj T*
+ET
+endstream
+endobj
+xref
+0 6
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000115 00000 n 
+0000000241 00000 n 
+0000000309 00000 n 
+trailer
+<< /Size 6 /Root 1 0 R >>
+startxref
+1544
+%%EOF

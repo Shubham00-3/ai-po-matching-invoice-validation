@@ -1,0 +1,621 @@
+{
+  "name": "Flow A - PO Ingest Extract Match Store",
+  "nodes": [
+    {
+      "name": "Gmail Trigger",
+      "type": "n8n-nodes-base.gmailTrigger",
+      "typeVersion": 1.2,
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyMinute"
+            }
+          ]
+        },
+        "simple": false,
+        "filters": {
+          "q": "has:attachment filename:pdf"
+        },
+        "options": {
+          "downloadAttachments": true,
+          "dataPropertyAttachmentsPrefixName": "attachment_"
+        }
+      },
+      "position": [
+        240,
+        300
+      ],
+      "id": "gmail-trigger"
+    },
+    {
+      "name": "Email Metadata",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Step 1 - capture email metadata + normalize the PDF attachment to binary key \"data\".\n// Robust to both n8n's normalized Gmail output AND the raw Gmail API format\n// (Simplify OFF), where From/Subject/Date live in payload.headers[{name,value}].\nconst item = $input.item;\nconst j = item.json || {};\nconst bin = item.binary || {};\n\n// find first PDF attachment regardless of its property name (attachment_0, ...)\nconst pdfKey = Object.keys(bin).find(k =>\n  (bin[k].mimeType || '').toLowerCase().includes('pdf') ||\n  (bin[k].fileName || '').toLowerCase().endsWith('.pdf'));\n\n// header lookup across raw (payload.headers array) and normalized shapes\nconst headers = j.payload?.headers || j.headers || [];\nconst getHeader = (name) => {\n  let v = null;\n  if (Array.isArray(headers)) {\n    const h = headers.find(x => (x.name || '').toLowerCase() === name.toLowerCase());\n    v = h ? h.value : null;\n  } else if (headers && typeof headers === 'object') {\n    v = headers[name] ?? headers[name.toLowerCase()] ?? null;\n  }\n  if (typeof v === 'string') v = v.replace(new RegExp('^' + name + '\\\\s*:\\\\s*', 'i'), '').trim();\n  return v || null;\n};\n\nconst fromStr = j.from?.text || (typeof j.from === 'string' ? j.from : null) || getHeader('From') || j.From || '';\nconst senderEmail = j.from?.value?.[0]?.address || (fromStr.match(/[\\w.+-]+@[\\w.-]+/) || [null])[0];\nconst senderName = j.from?.value?.[0]?.name\n  || (fromStr.includes('<') ? fromStr.split('<')[0].replace(/\"/g, '').trim() : null)\n  || senderEmail;\nconst subject = j.subject || getHeader('Subject') || j.Subject || '';\n\nlet receivedAt;\nif (j.date) receivedAt = new Date(j.date).toISOString();\nelse if (j.internalDate) receivedAt = new Date(Number(j.internalDate)).toISOString();\nelse { const d = getHeader('Date'); receivedAt = d ? new Date(d).toISOString() : new Date().toISOString(); }\n\nconst out = {\n  hasPdf: Boolean(pdfKey),\n  senderName: senderName || null,\n  senderEmail: senderEmail || null,\n  subject,\n  receivedAt,\n  messageId: j.id || j.messageId || null,\n  pdfFilename: pdfKey ? (bin[pdfKey].fileName || 'invoice.pdf') : null,\n};\nif (!pdfKey) return { json: out };\nreturn { json: out, binary: { data: bin[pdfKey] } };"
+      },
+      "position": [
+        480,
+        300
+      ],
+      "id": "email-metadata"
+    },
+    {
+      "name": "Has PDF?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "leftValue": "={{ $json.hasPdf }}",
+              "rightValue": "true",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ]
+        }
+      },
+      "position": [
+        720,
+        300
+      ],
+      "id": "has-pdf?"
+    },
+    {
+      "name": "Extract PDF Text",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1,
+      "parameters": {
+        "operation": "pdf",
+        "binaryPropertyName": "data",
+        "options": {}
+      },
+      "position": [
+        960,
+        300
+      ],
+      "id": "extract-pdf-text"
+    },
+    {
+      "name": "Has Text Layer?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "leftValue": "={{ ($json.text || '').trim().length }}",
+              "rightValue": 30,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ]
+        }
+      },
+      "position": [
+        1200,
+        300
+      ],
+      "id": "has-text-layer?"
+    },
+    {
+      "name": "Build OpenAI Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Step 2 - assemble the OpenAI Chat Completions body (Structured Outputs, temp 0).\nconst SYSTEM_PROMPT = \"You are a precise invoice-data extraction engine. You read raw text extracted from a supplier invoice PDF and return structured data. Rules: extract ONLY what is present in the text - never invent or guess values; use null for any scalar you cannot find and [] for empty lists; numbers must be plain numbers (no currency symbols or thousands separators); dates must be ISO YYYY-MM-DD; currency must be the ISO-4217 code (CAD, USD, EUR...); tax_rate is the percent as a number (13 for 13%). Set confidence_score (0..1) lower when the document is sparse, garbled, or ambiguous, and add a short note to extraction_warnings for anything unusual (unreadable fields, math that does not add up, missing PO).\";\nconst RESPONSE_FORMAT = { type: 'json_schema', json_schema: {\"name\": \"invoice_extraction\", \"strict\": true, \"schema\": {\"type\": \"object\", \"additionalProperties\": false, \"properties\": {\"vendor_name\": {\"type\": [\"string\", \"null\"]}, \"vendor_id\": {\"type\": [\"string\", \"null\"]}, \"purchase_order_number\": {\"type\": [\"string\", \"null\"]}, \"invoice_number\": {\"type\": [\"string\", \"null\"]}, \"invoice_date\": {\"type\": [\"string\", \"null\"], \"description\": \"ISO YYYY-MM-DD\"}, \"due_date\": {\"type\": [\"string\", \"null\"], \"description\": \"ISO YYYY-MM-DD\"}, \"currency\": {\"type\": [\"string\", \"null\"], \"description\": \"ISO-4217 code\"}, \"net_amount\": {\"type\": [\"number\", \"null\"]}, \"tax_amount\": {\"type\": [\"number\", \"null\"]}, \"tax_rate\": {\"type\": [\"number\", \"null\"], \"description\": \"percent, e.g. 13\"}, \"gross_amount\": {\"type\": [\"number\", \"null\"]}, \"line_items\": {\"type\": \"array\", \"items\": {\"type\": \"object\", \"additionalProperties\": false, \"properties\": {\"sku\": {\"type\": [\"string\", \"null\"]}, \"description\": {\"type\": [\"string\", \"null\"]}, \"quantity\": {\"type\": [\"number\", \"null\"]}, \"unit_price\": {\"type\": [\"number\", \"null\"]}, \"line_total\": {\"type\": [\"number\", \"null\"]}}, \"required\": [\"sku\", \"description\", \"quantity\", \"unit_price\", \"line_total\"]}}, \"confidence_score\": {\"type\": \"number\"}, \"extraction_warnings\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}}}, \"required\": [\"vendor_name\", \"vendor_id\", \"purchase_order_number\", \"invoice_number\", \"invoice_date\", \"due_date\", \"currency\", \"net_amount\", \"tax_amount\", \"tax_rate\", \"gross_amount\", \"line_items\", \"confidence_score\", \"extraction_warnings\"]}} };\n\nconst pdfText = ($json.text || '').slice(0, 60000); // safety cap\nreturn { json: { openaiBody: {\n  model: 'gpt-4.1-nano',\n  temperature: 0,\n  max_tokens: 2000,\n  messages: [\n    { role: 'system', content: SYSTEM_PROMPT },\n    { role: 'user', content: 'Extract this invoice into the JSON schema.\\n\\n===== INVOICE TEXT START =====\\n' + pdfText + '\\n===== INVOICE TEXT END =====' },\n  ],\n  response_format: RESPONSE_FORMAT,\n} } };"
+      },
+      "position": [
+        1440,
+        300
+      ],
+      "id": "build-openai-request"
+    },
+    {
+      "name": "OpenAI Extract",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "openAiApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.openaiBody) }}",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "position": [
+        1680,
+        300
+      ],
+      "id": "openai-extract",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "name": "Parse Extraction",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Step 2b - parse the model output and map to the engine's invoice contract.\nconst raw = $json.choices?.[0]?.message?.content ?? '';\nlet text = String(raw).trim();\n// defensive fence strip (Structured Outputs should make this a no-op)\ntext = text.replace(/^```(?:json)?\\s*/i, '').replace(/```\\s*$/,'').trim();\nlet x;\ntry { x = JSON.parse(text); }\ncatch (e) { throw new Error('EXTRACTION_JSON_INVALID: ' + e.message); }\n\nconst invoice = {\n  vendorName: x.vendor_name, vendorId: x.vendor_id,\n  poNumber: x.purchase_order_number ?? x.po_number ?? null,\n  invoiceNumber: x.invoice_number,\n  invoiceDate: x.invoice_date, dueDate: x.due_date,\n  currency: x.currency,\n  netAmount: x.net_amount, taxAmount: x.tax_amount,\n  taxRatePct: x.tax_rate ?? x.tax_rate_pct ?? null,\n  grossAmount: x.gross_amount,\n  lineItems: (x.line_items || []).map(li => ({\n    sku: li.sku, description: li.description, quantity: li.quantity,\n    unitPrice: li.unit_price, lineTotal: li.line_total,\n  })),\n  confidenceScore: x.confidence_score ?? x.confidence ?? null,\n  extractionWarnings: x.extraction_warnings || [],\n};\nconst meta = $('Email Metadata').item.json;\nreturn { json: { invoice, meta, rawAi: text } };"
+      },
+      "position": [
+        1920,
+        300
+      ],
+      "id": "parse-extraction"
+    },
+    {
+      "name": "Check Duplicate",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "GET",
+        "url": "=https://api.airtable.com/v0/appAcDIn6VkCTnRKW/Invoices?maxRecords=1&filterByFormula={{ encodeURIComponent('{Invoice Number}=\"' + (($('Parse Extraction').item.json.invoice.invoiceNumber || '').replace(/\"/g, '')) + '\"') }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "airtableTokenApi",
+        "options": {}
+      },
+      "position": [
+        2160,
+        300
+      ],
+      "id": "check-duplicate",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "name": "Is Duplicate?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "leftValue": "={{ ($json.records || []).length }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ]
+        }
+      },
+      "position": [
+        2400,
+        300
+      ],
+      "id": "is-duplicate?"
+    },
+    {
+      "name": "Find PO",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "GET",
+        "url": "=https://api.airtable.com/v0/appAcDIn6VkCTnRKW/Purchase_Orders?filterByFormula={{ encodeURIComponent('{PO Number}=\"' + (($('Parse Extraction').item.json.invoice.poNumber || '').replace(/\"/g, '')) + '\"') }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "airtableTokenApi",
+        "options": {}
+      },
+      "position": [
+        2640,
+        300
+      ],
+      "id": "find-po",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "name": "Prepare Match Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Step 3 - map the Airtable PO record (or absence) to the engine's PO contract.\nconst inv = $('Parse Extraction').item.json;\nconst rec = ($json.records || [])[0];\nlet po;\nif (!rec) {\n  po = { _notFound: true };\n} else {\n  const f = rec.fields || {};\n  let lines = [];\n  try { lines = JSON.parse(f['Line Items JSON'] || '[]'); } catch (e) { /* engine flags missing lines */ }\n  po = {\n    vendorName: f['Vendor Name'], vendorId: f['Vendor ID'], poNumber: f['PO Number'],\n    currency: f['Currency'], approvalStatus: f['Approval Status'],\n    netTotal: f['Net Amount'], taxTotal: f['Tax Amount'], grossTotal: f['Total Amount'],\n    totalIsGross: true, expectedTaxRatePct: f['Expected Tax Rate Pct'],\n    lineItems: lines.map(li => ({\n      sku: li.sku, description: li.description, quantity: li.quantity,\n      unitPrice: li.unit_price, lineTotal: li.line_total,\n    })),\n    _recordId: rec.id,\n  };\n}\nreturn { json: { invoice: inv.invoice, po, meta: inv.meta, rawAi: inv.rawAi } };"
+      },
+      "position": [
+        2880,
+        300
+      ],
+      "id": "prepare-match-input"
+    },
+    {
+      "name": "Matching Engine",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// ============================================================================\n// PO MATCHING & INVOICE VALIDATION ENGINE  v2.0.0\n// Deterministic. No LLM in the decision path. Pure function of (invoice, po).\n// ============================================================================\n\n// ----------------------------- CONFIG --------------------------------------\n// In production, source these from n8n env vars, e.g.:\n//   MONEY_REL_TOLERANCE_PCT = Number($env.MONEY_REL_TOLERANCE_PCT ?? 2)\n// Kept as literals here so the node is self-contained and copy-pasteable.\nconst CONFIG = {\n  MONEY_REL_TOLERANCE_PCT: 2,     // \u00b1% allowed on net / tax / total / unit price\n  TAX_ABS_TOLERANCE_CENTS: 2,     // absolute rounding slack on recomputed tax (cents)\n  TAX_REL_CEILING_CENTS: 500,     // relative tax tolerance only applies up to this abs $ ceiling\n  TOTAL_ABS_TOLERANCE_CENTS: 2,   // absolute slack on Net+Tax==Gross identity (cents)\n  QUANTITY_EXACT: true,           // quantity must match exactly (else uses money tol.)\n  DESC_SIMILARITY_THRESHOLD: 0.6, // Jaccard token overlap to accept a description match\n  VENDOR_LEVENSHTEIN_MAX: 2,      // max edit distance for a \"fuzzy\" vendor match\n  VENDOR_FUZZY_MIN_LEN: 5,        // never fuzzy-match normalized names shorter than this\n  VENDOR_FUZZY_RATIO: 0.2,        // and cap distance at floor(len * ratio)\n  REQUIRE_PO_APPROVED: true,      // PO must have approvalStatus == Approved\n  ALLOW_CREDIT_NOTES: true,       // treat negative net/qty as a credit note, not an error\n  PO_TOTAL_IS_GROSS_DEFAULT: true,// how to interpret legacy `totalAmount` when totalIsGross absent\n\n  // ---- Severity policy table (documented, configurable) -------------------\n  // Maps each discrepancy TYPE to its severity. Change policy here in one place.\n  SEVERITY: {\n    missing_po:                 'major',\n    wrong_po:                   'major', // wrong PO fetched \u2014 terminal, do not deep-compare\n    po_not_approved:            'major',\n    vendor_mismatch:            'major',\n    vendor_name_under_id:       'minor', // vendorId matches but names diverge \u2014 human glance\n    po_number_mismatch:         'major',\n    currency_mismatch:          'major',\n    quantity_mismatch:          'major',\n    unit_price_mismatch:        'major',\n    net_amount_mismatch:        'major', // invoice net vs PO net beyond tolerance\n    tax_amount_mismatch:        'major', // invoice tax vs PO tax field beyond tolerance\n    additional_line_item:       'major', // invoice bills something not on the PO\n    missing_line_item:          'minor', // on PO, not invoiced \u2014 usually a partial delivery\n    incorrect_tax_calculation:  'minor', // small tax drift; large drift auto-escalates (see code)\n    total_identity_mismatch:    'major', // Net+Tax != Gross by > slack (invoice arithmetic broken)\n    invoice_exceeds_po:         'major', // gross invoice > approved PO gross beyond tolerance\n    under_billing:              'minor', // invoice below PO value (partial / under-bill)\n    missing_data:               'minor', // a required field was null/unreadable \u2014 human confirms\n    low_confidence:             'minor', // LLM confidence below floor \u2014 human glance advised\n  },\n  CONFIDENCE_FLOOR: 0.70,         // below this, raise a `low_confidence` minor discrepancy\n};\n\n// ------------------------- SMALL UTILITIES ---------------------------------\nconst isNil = (v) => v === null || v === undefined || v === '';\n\n/** Coerce anything money-ish to integer CENTS. Returns null if not parseable.\n *  Preserves sign so credit notes (negative amounts) survive. */\nfunction toCents(v) {\n  if (isNil(v)) return null;\n  if (typeof v === 'number' && Number.isFinite(v)) return Math.round(v * 100);\n  // strip currency symbols, thousands separators, spaces \u2014 keep digits, dot, minus\n  const cleaned = String(v).replace(/[^0-9.\\-]/g, '');\n  if (cleaned === '' || cleaned === '-' || cleaned === '.') return null;\n  const n = Number(cleaned);\n  return Number.isFinite(n) ? Math.round(n * 100) : null;\n}\n\n/** Coerce to a finite number (for quantities). Returns null if not parseable. */\nfunction toNum(v) {\n  if (isNil(v)) return null;\n  const n = typeof v === 'number' ? v : Number(String(v).replace(/[^0-9.\\-]/g, ''));\n  return Number.isFinite(n) ? n : null;\n}\n\nconst centsToStr = (c) => (c === null || c === undefined ? 'n/a' : (c / 100).toFixed(2));\n\n/** Case-fold, trim, collapse whitespace. */\nfunction normText(s) {\n  if (isNil(s)) return '';\n  return String(s).toLowerCase().trim().replace(/\\s+/g, ' ');\n}\n\n/** Vendor/company normalization: normText + strip legal suffixes + punctuation. */\nconst LEGAL_SUFFIXES = [\n  'ltd', 'limited', 'inc', 'incorporated', 'llc', 'llp', 'plc', 'corp',\n  'corporation', 'co', 'company', 'gmbh', 'ag', 'sa', 'sarl', 'bv', 'pty',\n  'pvt', 'srl', 'oy', 'ab', 'as', 'nv',\n];\nfunction normVendor(s) {\n  let t = normText(s).replace(/[.,]/g, ' ').replace(/\\s+/g, ' ').trim();\n  const tokens = t.split(' ').filter((w) => w && !LEGAL_SUFFIXES.includes(w));\n  return tokens.join(' ');\n}\n\n/** Normalize PO / SKU codes: uppercase, strip all non-alphanumerics. */\nconst normCode = (s) => (isNil(s) ? '' : String(s).toUpperCase().replace(/[^A-Z0-9]/g, ''));\n\n/** Levenshtein edit distance (bounded use; strings here are short). */\nfunction levenshtein(a, b) {\n  a = a || ''; b = b || '';\n  if (a === b) return 0;\n  if (!a.length) return b.length;\n  if (!b.length) return a.length;\n  const prev = new Array(b.length + 1);\n  for (let j = 0; j <= b.length; j++) prev[j] = j;\n  for (let i = 1; i <= a.length; i++) {\n    let diag = prev[0];\n    prev[0] = i;\n    for (let j = 1; j <= b.length; j++) {\n      const tmp = prev[j];\n      const cost = a[i - 1] === b[j - 1] ? 0 : 1;\n      prev[j] = Math.min(prev[j] + 1, prev[j - 1] + 1, diag + cost);\n      diag = tmp;\n    }\n  }\n  return prev[b.length];\n}\n\n/** Jaccard token-set similarity in [0,1] for description matching.\n *  Returns 0 when EITHER set is empty \u2014 empty descriptions must never auto-pair. */\nfunction jaccard(a, b) {\n  const A = new Set(normText(a).split(' ').filter(Boolean));\n  const B = new Set(normText(b).split(' ').filter(Boolean));\n  if (!A.size || !B.size) return 0;\n  let inter = 0;\n  for (const t of A) if (B.has(t)) inter++;\n  return inter / (A.size + B.size - inter);\n}\n\n/** Relative-tolerance money comparison, all in cents.\n *  Returns { ok, deltaCents, relPct }. Reference is the PO value.\n *  Compares magnitudes so credit notes (negative on both sides) behave. */\nfunction moneyWithinTol(invCents, poCents, relPct = CONFIG.MONEY_REL_TOLERANCE_PCT) {\n  if (invCents === null || poCents === null) return { ok: false, deltaCents: null, relPct: null };\n  const delta = invCents - poCents;\n  const base = Math.abs(poCents);\n  if (base === 0) {\n    // Zero-value PO line: only an exactly-zero invoice value matches; any nonzero is out.\n    return { ok: invCents === 0, deltaCents: delta, relPct: invCents === 0 ? 0 : Infinity };\n  }\n  const pct = (Math.abs(delta) / base) * 100;\n  return { ok: pct <= relPct, deltaCents: delta, relPct: pct };\n}\n\n/** Accept a possibly-stringified array of line items. */\nfunction coerceLineItems(v) {\n  if (Array.isArray(v)) return v;\n  if (typeof v === 'string') {\n    try { const p = JSON.parse(v); return Array.isArray(p) ? p : []; } catch { return []; }\n  }\n  return [];\n}\n\n/** Compact scalar label for a line item (never an object). */\nfunction lineToStr(li) {\n  if (!li) return 'n/a';\n  const desc = (li.description || li.sku || 'line').toString().trim();\n  const qty = li.quantity ?? '?';\n  const price = (li.unitPriceCents ?? null) !== null ? ` @ ${centsToStr(li.unitPriceCents)}` : '';\n  return `${desc} x${qty}${price}`;\n}\n\n/** Resolve an effective { netCents, grossCents } from whatever PO total fields exist,\n *  making the tax basis explicit instead of assuming `totalAmount` is gross. */\nfunction resolvePoTotals(po) {\n  const net = toCents(po.netTotal);\n  const tax = toCents(po.taxTotal);\n  const gross = toCents(po.grossTotal);\n  const legacy = toCents(po.totalAmount);\n  const legacyIsGross =\n    po.totalIsGross === undefined ? CONFIG.PO_TOTAL_IS_GROSS_DEFAULT : !!po.totalIsGross;\n\n  let netCents = net;\n  let grossCents = gross;\n  if (grossCents === null && legacy !== null && legacyIsGross) grossCents = legacy;\n  if (netCents === null && legacy !== null && !legacyIsGross) netCents = legacy;\n  // Derive the missing side from net/tax if we can.\n  if (grossCents === null && netCents !== null && tax !== null) grossCents = netCents + tax;\n  if (netCents === null && grossCents !== null && tax !== null) netCents = grossCents - tax;\n  return { netCents, grossCents, taxCents: tax };\n}\n\n// --------------------- READ + NORMALIZE INPUTS -----------------------------\nconst raw = $json || {};\nconst invoice = raw.invoice || {};\n// PO may arrive as a full Airtable record ({id, fields}) or as bare fields.\nlet po = raw.po || {};\nif (po && po.fields && typeof po.fields === 'object') po = po.fields;\nconst poMissing =\n  isNil(po) || (typeof po === 'object' && Object.keys(po).length === 0) || po._notFound === true;\n\nconst fieldComparisons = [];\nconst discrepancies = [];\n\nconst pushCmp = (field, invoiceValue, poValue, match, note) =>\n  fieldComparisons.push({ field, invoiceValue, poValue, match: !!match, note: note || '' });\n\nconst pushDisc = (field, type, invoiceValue, poValue, delta, message, sevOverride) => {\n  const severity = sevOverride || CONFIG.SEVERITY[type] || 'minor';\n  discrepancies.push({ field, type, severity, invoiceValue, poValue, delta, message });\n};\n\n// ============================================================================\n// STEP 1 \u2014 MISSING PO  (terminal)\n// ============================================================================\nif (poMissing) {\n  pushCmp('poNumber', invoice.poNumber ?? null, null, false, 'No PO record found');\n  pushDisc(\n    'poNumber', 'missing_po',\n    invoice.poNumber ?? null, null, null,\n    `No approved Purchase Order found for PO Number \"${invoice.poNumber ?? '(none on invoice)'}\".`\n  );\n  return finalize();\n}\n\n// ============================================================================\n// STEP 2 \u2014 PO NUMBER (exact after normalization) \u2014 TERMINAL if wrong PO\n// A blank invoice PO number is a data-quality issue; a *different* PO number\n// means we fetched the wrong commitment and must NOT deep-compare against it.\n// ============================================================================\n{\n  const invN = normCode(invoice.poNumber);\n  const poN = normCode(po.poNumber);\n\n  if (invN === '') {\n    pushCmp('poNumber', invoice.poNumber ?? null, po.poNumber ?? null, false, 'invoice PO number missing');\n    pushDisc('poNumber', 'missing_data', null, po.poNumber ?? null, null,\n      `Invoice has no readable PO number to match against PO record \"${po.poNumber ?? ''}\".`);\n    // Not terminal: continue so other checks still surface, but flagged for a human.\n  } else if (invN !== poN) {\n    pushCmp('poNumber', invoice.poNumber ?? null, po.poNumber ?? null, false, 'wrong PO fetched');\n    pushDisc('poNumber', 'wrong_po', invoice.poNumber ?? null, po.poNumber ?? null, null,\n      `Invoice PO \"${invoice.poNumber ?? ''}\" does not match fetched PO \"${po.poNumber ?? ''}\". ` +\n      `Refusing to compare against the wrong Purchase Order.`);\n    return finalize(); // terminal: deep comparison against a wrong PO would be meaningless\n  } else {\n    pushCmp('poNumber', invoice.poNumber ?? null, po.poNumber ?? null, true, 'exact (normalized)');\n  }\n}\n\n// ============================================================================\n// STEP 3 \u2014 PO APPROVAL STATUS\n// ============================================================================\nif (CONFIG.REQUIRE_PO_APPROVED) {\n  const approved = normText(po.approvalStatus) === 'approved';\n  pushCmp('approvalStatus', null, po.approvalStatus ?? null, approved,\n    approved ? 'PO is Approved' : 'PO is not in Approved state');\n  if (!approved) {\n    pushDisc('approvalStatus', 'po_not_approved', null, po.approvalStatus ?? null, null,\n      `Matched PO exists but its approval status is \"${po.approvalStatus ?? 'unknown'}\", not \"Approved\".`);\n  }\n}\n\n// ============================================================================\n// STEP 4 \u2014 CURRENCY (exact; absent-on-both is missing-data, not a mismatch)\n// ============================================================================\n{\n  const invC = normText(invoice.currency).toUpperCase();\n  const poC = normText(po.currency).toUpperCase();\n  if (invC === '' && poC === '') {\n    pushCmp('currency', invoice.currency ?? null, po.currency ?? null, false, 'currency absent on both sides');\n    pushDisc('currency', 'missing_data', invoice.currency ?? null, po.currency ?? null, null,\n      `Currency is missing on both the invoice and the PO; cannot confirm payment currency.`);\n  } else {\n    const match = invC !== '' && invC === poC;\n    pushCmp('currency', invoice.currency ?? null, po.currency ?? null, match,\n      match ? 'exact' : 'currency codes differ');\n    if (!match) {\n      pushDisc('currency', 'currency_mismatch', invoice.currency ?? null, po.currency ?? null, null,\n        `Currency mismatch: invoice ${invoice.currency ?? '?'} vs PO ${po.currency ?? '?'}.`);\n    }\n  }\n}\n\n// ============================================================================\n// STEP 5 \u2014 VENDOR (id \u2192 exact \u2192 normalized \u2192 guarded fuzzy)\n// vendorId pairs the record, but a diverging NAME under a matching id still\n// raises a minor flag (a misread id / shared id must not silently pay anyone).\n// Fuzzy matching is guarded by a minimum length + relative distance ratio so\n// short unrelated names (ACME vs ACRE) never collide.\n// ============================================================================\n{\n  const invRaw = invoice.vendorName ?? null;\n  const poRaw = po.vendorName ?? null;\n  const invId = normCode(invoice.vendorId);\n  const poId = normCode(po.vendorId);\n\n  const invNorm = normVendor(invRaw);\n  const poNorm = normVendor(poRaw);\n  const exact = normText(invRaw) === normText(poRaw) && normText(invRaw) !== '';\n  const normEqual = invNorm === poNorm && invNorm !== '';\n  const dist = levenshtein(invNorm, poNorm);\n  const shortest = Math.min(invNorm.length, poNorm.length);\n  const ratioCap = Math.floor(shortest * CONFIG.VENDOR_FUZZY_RATIO);\n  const fuzzyBudget = Math.min(CONFIG.VENDOR_LEVENSHTEIN_MAX, ratioCap);\n  const fuzzyOk = shortest >= CONFIG.VENDOR_FUZZY_MIN_LEN && dist <= fuzzyBudget;\n  const idMatch = invId !== '' && invId === poId;\n  const nameAgrees = exact || normEqual || fuzzyOk;\n\n  let match, note;\n  if (idMatch && nameAgrees) {\n    match = true; note = 'vendorId + name match';\n  } else if (idMatch && !nameAgrees) {\n    // ID matches but names disagree: pair them, but demand a human glance.\n    match = true; note = `vendorId match but names differ (edit distance ${dist})`;\n    pushDisc('vendorName', 'vendor_name_under_id', invRaw, poRaw, null,\n      `vendorId matches but vendor names differ: invoice \"${invRaw ?? ''}\" vs PO \"${poRaw ?? ''}\". ` +\n      `Confirm this is the same payee.`);\n  } else if (exact) {\n    match = true; note = 'exact name match';\n  } else if (normEqual) {\n    match = true; note = 'normalized match (suffix/case/space folded)';\n  } else if (fuzzyOk) {\n    match = true; note = `fuzzy match (Levenshtein ${dist} \u2264 ${fuzzyBudget})`;\n  } else {\n    match = false; note = `no match (Levenshtein ${dist})`;\n  }\n\n  pushCmp('vendorName', invRaw, poRaw, match, note);\n  if (!match) {\n    pushDisc('vendorName', 'vendor_mismatch', invRaw, poRaw, null,\n      `Vendor mismatch: invoice \"${invRaw ?? ''}\" vs PO \"${poRaw ?? ''}\" (edit distance ${dist}).`);\n  }\n}\n\n// ============================================================================\n// STEP 6 \u2014 LINE ITEM ALIGNMENT  (the hard part)\n// ----------------------------------------------------------------------------\n// Algorithm:\n//   0. AGGREGATE invoice (and PO) lines by normalized SKU, summing quantity so\n//      split shipments (2\u00d7 \"sku A qty 5\") reconcile against one PO line (qty 10).\n//   1. Align by normalized SKU/code (strongest signal).\n//   2. For SKU-less lines, greedily align by best description Jaccard similarity\n//      above DESC_SIMILARITY_THRESHOLD (highest score first). Empty descriptions\n//      never pair (jaccard returns 0).\n//   3. Leftover invoice lines  -> additional_line_item (billed, not on PO).\n//      Leftover PO lines       -> missing_line_item   (on PO, not invoiced).\n//   4. For each aligned pair: check quantity (exact by default; null => missing_data)\n//      and unit price (money tolerance). Emit per-line discrepancies + comparisons.\n// Field keys embed the physical index so duplicate SKUs never collide.\n// ============================================================================\n{\n  const mapLine = (li, i) => ({\n    idx: i,\n    sku: li && li.sku,\n    description: (li && li.description) || '',\n    quantity: toNum(li && li.quantity),\n    unitPriceCents: toCents(li && li.unitPrice),\n    uom: normText(li && li.unitOfMeasure),\n  });\n\n  // -- Pass 0: aggregate same-SKU lines (sum qty; keep first unit price) --------\n  function aggregateBySku(lines) {\n    const bySku = new Map();\n    const passthrough = [];\n    for (const l of lines) {\n      const code = normCode(l.sku);\n      if (!code) { passthrough.push(l); continue; }\n      if (!bySku.has(code)) {\n        bySku.set(code, { ...l, _mergedIdxs: [l.idx], _priceConflict: false });\n      } else {\n        const agg = bySku.get(code);\n        // sum quantities when both present; otherwise mark as missing-data downstream\n        agg.quantity = (agg.quantity === null || l.quantity === null)\n          ? (agg.quantity ?? l.quantity)\n          : agg.quantity + l.quantity;\n        if (agg.unitPriceCents !== null && l.unitPriceCents !== null\n            && agg.unitPriceCents !== l.unitPriceCents) agg._priceConflict = true;\n        agg._mergedIdxs.push(l.idx);\n      }\n    }\n    return [...bySku.values(), ...passthrough];\n  }\n\n  const invLines = aggregateBySku(coerceLineItems(invoice.lineItems).map(mapLine));\n  const poLines = aggregateBySku(coerceLineItems(po.lineItems).map(mapLine));\n\n  const poUsed = new Set();\n  const pairs = []; // { inv, po }\n\n  // -- Pass 1: SKU/code alignment --\n  for (const inv of invLines) {\n    const code = normCode(inv.sku);\n    if (!code) continue;\n    const match = poLines.find((p) => !poUsed.has(p.idx) && normCode(p.sku) === code);\n    if (match) { pairs.push({ inv, po: match }); poUsed.add(match.idx); inv._paired = true; }\n  }\n\n  // -- Pass 2: description similarity for still-unpaired invoice lines --\n  for (const inv of invLines) {\n    if (inv._paired) continue;\n    let best = null, bestScore = 0;\n    for (const p of poLines) {\n      if (poUsed.has(p.idx)) continue;\n      const score = jaccard(inv.description, p.description);\n      if (score > bestScore) { bestScore = score; best = p; }\n    }\n    if (best && bestScore >= CONFIG.DESC_SIMILARITY_THRESHOLD) {\n      pairs.push({ inv, po: best, score: bestScore });\n      poUsed.add(best.idx);\n      inv._paired = true;\n    }\n  }\n\n  const keyFor = (li) => `#${li.idx}${normCode(li.sku) ? '/' + normCode(li.sku) : ''}`;\n\n  // -- Additional line items: invoice lines never paired --\n  for (const inv of invLines) {\n    if (inv._paired) continue;\n    const k = `lineItem[${keyFor(inv)}]`;\n    pushCmp(k, lineToStr(inv), null, false, 'not present on PO');\n    pushDisc(k, 'additional_line_item', lineToStr(inv), null, null,\n      `Invoice bills line \"${inv.description || inv.sku || `#${inv.idx}`}\" ` +\n      `(qty ${inv.quantity}) that is not on the PO.`);\n  }\n\n  // -- Missing line items: PO lines never paired --\n  for (const p of poLines) {\n    if (poUsed.has(p.idx)) continue;\n    const k = `lineItem[${keyFor(p)}]`;\n    pushCmp(k, null, lineToStr(p), false, 'on PO, not invoiced');\n    pushDisc(k, 'missing_line_item', null, lineToStr(p), null,\n      `PO line \"${p.description || p.sku || `#${p.idx}`}\" (qty ${p.quantity}) ` +\n      `was not invoiced (possible partial delivery).`);\n  }\n\n  // -- Compare each aligned pair --\n  for (const { inv, po: p } of pairs) {\n    const base = `lineItem[${keyFor(inv)}]`;\n\n    // Unit-of-measure sanity: differing UoM makes qty/price comparison meaningless.\n    if (inv.uom && p.uom && inv.uom !== p.uom) {\n      pushCmp(`${base}.unitOfMeasure`, inv.uom, p.uom, false, 'unit of measure differs');\n      pushDisc(`${base}.unitOfMeasure`, 'missing_data', inv.uom, p.uom, null,\n        `Unit of measure differs (invoice \"${inv.uom}\" vs PO \"${p.uom}\"); ` +\n        `quantity/price comparison may not be like-for-like. Human confirm.`);\n    }\n\n    // Quantity \u2014 null on either side is a data-quality issue, not a mismatch.\n    if (inv.quantity === null || p.quantity === null) {\n      pushCmp(`${base}.quantity`, inv.quantity, p.quantity, false, 'quantity unreadable');\n      pushDisc(`${base}.quantity`, 'missing_data', inv.quantity, p.quantity, null,\n        `Quantity for ${keyFor(inv)} could not be read (invoice ${inv.quantity} / PO ${p.quantity}); ` +\n        `human confirmation required.`);\n    } else if (CONFIG.QUANTITY_EXACT) {\n      const qMatch = inv.quantity === p.quantity;\n      pushCmp(`${base}.quantity`, inv.quantity, p.quantity, qMatch, qMatch ? 'exact' : 'quantity differs');\n      if (!qMatch) {\n        const delta = inv.quantity - p.quantity;\n        pushDisc(`${base}.quantity`, 'quantity_mismatch', inv.quantity, p.quantity, delta,\n          `Quantity for ${keyFor(inv)}: invoice ${inv.quantity} vs PO ${p.quantity} (\u0394 ${delta}).`);\n      }\n    } else {\n      const t = moneyWithinTol(inv.quantity * 100, p.quantity * 100);\n      pushCmp(`${base}.quantity`, inv.quantity, p.quantity, t.ok,\n        t.ok ? 'within qty tolerance' : 'quantity out of tolerance');\n      if (!t.ok) {\n        pushDisc(`${base}.quantity`, 'quantity_mismatch', inv.quantity, p.quantity,\n          inv.quantity - p.quantity, `Quantity for ${keyFor(inv)} differs beyond tolerance.`);\n      }\n    }\n\n    // Price conflict surfaced from aggregation (two invoice lines, same SKU, different price)\n    if (inv._priceConflict) {\n      pushDisc(`${base}.unitPrice`, 'missing_data', inv.unitPriceCents, null, null,\n        `Multiple invoice lines for ${keyFor(inv)} carry different unit prices; verify manually.`);\n    }\n\n    // Unit price (money tolerance)\n    if (inv.unitPriceCents === null || p.unitPriceCents === null) {\n      pushCmp(`${base}.unitPrice`, centsToStr(inv.unitPriceCents), centsToStr(p.unitPriceCents),\n        false, 'unit price unreadable');\n      pushDisc(`${base}.unitPrice`, 'missing_data', inv.unitPriceCents, p.unitPriceCents, null,\n        `Unit price for ${keyFor(inv)} could not be read; human confirmation required.`);\n    } else {\n      const t = moneyWithinTol(inv.unitPriceCents, p.unitPriceCents);\n      pushCmp(`${base}.unitPrice`, centsToStr(inv.unitPriceCents), centsToStr(p.unitPriceCents),\n        t.ok, t.ok ? `within ${CONFIG.MONEY_REL_TOLERANCE_PCT}%` : 'unit price out of tolerance');\n      if (!t.ok) {\n        const sign = (t.deltaCents ?? 0) >= 0 ? '+' : '';\n        pushDisc(`${base}.unitPrice`, 'unit_price_mismatch',\n          inv.unitPriceCents, p.unitPriceCents, t.deltaCents,\n          `Unit price for ${keyFor(inv)} is ${centsToStr(inv.unitPriceCents)} vs PO ` +\n          `${centsToStr(p.unitPriceCents)} (${sign}${(t.relPct ?? 0).toFixed(2)}%, ` +\n          `tolerance ${CONFIG.MONEY_REL_TOLERANCE_PCT}%).`);\n      }\n    }\n  }\n}\n\n// ============================================================================\n// STEP 7 \u2014 MONETARY TOTALS (Net + Tax vs PO, gross-vs-gross, identity)\n// ============================================================================\nconst invNet = toCents(invoice.netAmount);\nconst invTax = toCents(invoice.taxAmount);\nconst invGross = toCents(invoice.grossAmount);\nconst poT = resolvePoTotals(po);   // { netCents, grossCents, taxCents }\n\nconst isCreditNote = CONFIG.ALLOW_CREDIT_NOTES &&\n  ((invNet !== null && invNet < 0) || (invGross !== null && invGross < 0));\n\n// 7a. Net + Tax == Gross identity (internal consistency of the invoice)\nif (invNet !== null && invTax !== null && invGross !== null) {\n  const expected = invNet + invTax;\n  const delta = invGross - expected;\n  const ok = Math.abs(delta) <= CONFIG.TOTAL_ABS_TOLERANCE_CENTS;\n  pushCmp('grossAmount', centsToStr(invGross), centsToStr(expected), ok,\n    ok ? 'Net + Tax = Gross' : `Net + Tax (${centsToStr(expected)}) \u2260 Gross`);\n  if (!ok) {\n    pushDisc('grossAmount', 'total_identity_mismatch', invGross, expected, delta,\n      `Invoice arithmetic off: Net ${centsToStr(invNet)} + Tax ${centsToStr(invTax)} ` +\n      `= ${centsToStr(expected)} but Gross states ${centsToStr(invGross)} (\u0394 ${centsToStr(delta)}).`);\n  }\n}\n\n// 7b. NET amount: invoice net vs PO net (Step-4 mandated net-to-net comparison)\nif (invNet !== null && poT.netCents !== null) {\n  const t = moneyWithinTol(invNet, poT.netCents);\n  pushCmp('netAmount_vs_PO', centsToStr(invNet), centsToStr(poT.netCents), t.ok,\n    t.ok ? `within ${CONFIG.MONEY_REL_TOLERANCE_PCT}%` : 'net differs from PO net');\n  if (!t.ok) {\n    if (!isCreditNote && (t.deltaCents ?? 0) > 0) {\n      pushDisc('netAmount', 'net_amount_mismatch', invNet, poT.netCents, t.deltaCents,\n        `Invoice net ${centsToStr(invNet)} exceeds PO net ${centsToStr(poT.netCents)} ` +\n        `by ${centsToStr(t.deltaCents)} (+${(t.relPct ?? 0).toFixed(2)}%, ` +\n        `tolerance ${CONFIG.MONEY_REL_TOLERANCE_PCT}%).`);\n    } else {\n      pushDisc('netAmount', 'under_billing', invNet, poT.netCents, t.deltaCents,\n        `Invoice net ${centsToStr(invNet)} is below PO net ${centsToStr(poT.netCents)} ` +\n        `by ${centsToStr(Math.abs(t.deltaCents ?? 0))} (partial / under-billing?).`);\n    }\n  }\n} else if (invNet !== null && poT.netCents === null) {\n  pushCmp('netAmount_vs_PO', centsToStr(invNet), null, false, 'PO exposes no net value to compare');\n  pushDisc('netAmount', 'missing_data', invNet, null, null,\n    `PO has no net/pre-tax value; cannot verify invoice net ${centsToStr(invNet)} against the commitment.`);\n}\n\n// 7c. TAX amount: invoice tax vs PO tax field, when the PO carries one\nif (invTax !== null && poT.taxCents !== null) {\n  const t = moneyWithinTol(invTax, poT.taxCents);\n  pushCmp('taxAmount_vs_PO', centsToStr(invTax), centsToStr(poT.taxCents), t.ok,\n    t.ok ? `within ${CONFIG.MONEY_REL_TOLERANCE_PCT}%` : 'tax differs from PO tax');\n  if (!t.ok && !isCreditNote) {\n    pushDisc('taxAmount', 'tax_amount_mismatch', invTax, poT.taxCents, t.deltaCents,\n      `Invoice tax ${centsToStr(invTax)} differs from PO tax ${centsToStr(poT.taxCents)} ` +\n      `by ${centsToStr(t.deltaCents)} (${(t.relPct ?? 0).toFixed(2)}%).`);\n  }\n}\n\n// 7d. GROSS vs PO gross: over-value beyond tolerance is a hard block\nif (invGross !== null && poT.grossCents !== null) {\n  const t = moneyWithinTol(invGross, poT.grossCents);\n  pushCmp('grossAmount_vs_PO', centsToStr(invGross), centsToStr(poT.grossCents), t.ok,\n    t.ok ? `within ${CONFIG.MONEY_REL_TOLERANCE_PCT}%` : 'differs from PO gross');\n  if (!t.ok) {\n    if (!isCreditNote && (t.deltaCents ?? 0) > 0) {\n      pushDisc('grossAmount', 'invoice_exceeds_po', invGross, poT.grossCents, t.deltaCents,\n        `Invoice total ${centsToStr(invGross)} exceeds approved PO gross ${centsToStr(poT.grossCents)} ` +\n        `by ${centsToStr(t.deltaCents)} (+${(t.relPct ?? 0).toFixed(2)}%, ` +\n        `tolerance ${CONFIG.MONEY_REL_TOLERANCE_PCT}%).`);\n    } else {\n      pushDisc('grossAmount', 'under_billing', invGross, poT.grossCents, t.deltaCents,\n        `Invoice total ${centsToStr(invGross)} is below PO gross ${centsToStr(poT.grossCents)} ` +\n        `by ${centsToStr(Math.abs(t.deltaCents ?? 0))} (partial billing?).`);\n    }\n  }\n}\n\n// ============================================================================\n// STEP 8 \u2014 TAX RECOMPUTATION CHECK\n// Verify Tax \u2248 Net \u00d7 rate, using invoice rate, else PO expected rate.\n// Tolerance: absolute rounding slack, OR relative band but ONLY up to a bounded\n// absolute dollar ceiling \u2014 so a small % on a large tax can't hide a real $ error.\n// If no rate is available, we DO NOT assert \"consistent\": we raise a missing_data\n// minor so a human confirms the tax.\n// ============================================================================\n{\n  const ratePct = toNum(invoice.taxRatePct) ?? toNum(po.expectedTaxRatePct);\n  if (invNet !== null && invTax !== null && ratePct !== null) {\n    const expectedTax = Math.round(invNet * (ratePct / 100));\n    const delta = invTax - expectedTax;\n    const absDelta = Math.abs(delta);\n    const rel = moneyWithinTol(invTax, expectedTax);\n    const absOk = absDelta <= CONFIG.TAX_ABS_TOLERANCE_CENTS;\n    // relative band only forgives drift up to a bounded absolute ceiling\n    const relOk = rel.ok && absDelta <= CONFIG.TAX_REL_CEILING_CENTS;\n    const ok = absOk || relOk;\n    pushCmp('taxAmount', centsToStr(invTax), centsToStr(expectedTax), ok,\n      ok ? `consistent with ${ratePct}% rate` : `expected ~${centsToStr(expectedTax)} at ${ratePct}%`);\n    if (!ok) {\n      // Escalate to major if tax is wildly off (> 5% relative); otherwise minor.\n      const sev = (rel.relPct ?? 0) > 5 ? 'major' : 'minor';\n      pushDisc('taxAmount', 'incorrect_tax_calculation', invTax, expectedTax, delta,\n        `Tax ${centsToStr(invTax)} inconsistent with Net ${centsToStr(invNet)} \u00d7 ${ratePct}% ` +\n        `= ${centsToStr(expectedTax)} (\u0394 ${centsToStr(delta)}).`, sev);\n    }\n  } else if (invTax !== null) {\n    // Tax present but no rate to check it against \u2014 do not claim \"consistent\".\n    pushCmp('taxAmount', centsToStr(invTax), null, false, 'no tax rate available to verify');\n    pushDisc('taxAmount', 'missing_data', invTax, null, null,\n      `Invoice tax ${centsToStr(invTax)} present but no tax rate (invoice or PO) available to verify it; ` +\n      `human confirmation advised.`);\n  }\n}\n\n// ============================================================================\n// STEP 9 \u2014 CONFIDENCE FLOOR (LLM extraction quality signal)\n// ============================================================================\n{\n  const conf = toNum(invoice.confidenceScore);\n  if (conf !== null && conf < CONFIG.CONFIDENCE_FLOOR) {\n    pushDisc('confidenceScore', 'low_confidence', conf, CONFIG.CONFIDENCE_FLOOR, null,\n      `Extraction confidence ${conf} is below floor ${CONFIG.CONFIDENCE_FLOOR}; human verification advised.`);\n  }\n}\n\n// ============================================================================\n// FINALIZE \u2014 severity rollup + outcome band\n// ============================================================================\nreturn finalize();\n\nfunction finalize() {\n  const majorCount = discrepancies.filter((d) => d.severity === 'major').length;\n  const minorCount = discrepancies.filter((d) => d.severity === 'minor').length;\n\n  // Outcome bands (per spec):\n  //   any major  -> Rejected\n  //   only minor -> Procurement Review\n  //   none       -> Ready for Payment\n  let severity, validationStatus;\n  if (majorCount > 0)      { severity = 'major'; validationStatus = 'Rejected'; }\n  else if (minorCount > 0) { severity = 'minor'; validationStatus = 'Procurement Review'; }\n  else                     { severity = 'none';  validationStatus = 'Ready for Payment'; }\n\n  const poNum = (invoice && invoice.poNumber) || (po && po.poNumber) || '(unknown)';\n  const total = majorCount + minorCount;\n  const majorTypes = [...new Set(discrepancies.filter(d => d.severity === 'major').map(d => d.type))];\n  const matchSummary =\n    `PO ${poNum}: ${validationStatus}. ${majorCount} major / ${minorCount} minor ` +\n    `discrepanc${total === 1 ? 'y' : 'ies'}` +\n    (majorTypes.length ? ` \u2014 blocking: ${majorTypes.join(', ')}.` : '.');\n\n  return {\n    validationStatus,\n    severity,\n    matchSummary,\n    fieldComparisons,\n    discrepancies,\n    meta: {\n      engineVersion: '2.0.0',\n      evaluatedAt: new Date().toISOString(),\n      confidenceScore: toNum(invoice && invoice.confidenceScore),\n      tolerances: {\n        moneyRelPct: CONFIG.MONEY_REL_TOLERANCE_PCT,\n        taxAbsCents: CONFIG.TAX_ABS_TOLERANCE_CENTS,\n        taxRelCeilingCents: CONFIG.TAX_REL_CEILING_CENTS,\n        qtyExact: CONFIG.QUANTITY_EXACT,\n      },\n      counts: { major: majorCount, minor: minorCount, fields: fieldComparisons.length },\n    },\n  };\n}"
+      },
+      "position": [
+        3120,
+        300
+      ],
+      "id": "matching-engine"
+    },
+    {
+      "name": "Format Airtable Fields",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Steps 4-7 output - map engine result + context to Airtable Invoices fields.\nconst eng = $json;   // matching-engine output\nconst ctx = $('Prepare Match Input').item.json;\nconst inv = ctx.invoice, meta = ctx.meta;\n\nconst noMatch = (eng.discrepancies || []).some(d => d.type === 'missing_po' || d.type === 'wrong_po');\nconst fields = {\n  'Invoice Number': inv.invoiceNumber || 'UNKNOWN',\n  'Vendor Name': inv.vendorName || '',\n  'Vendor ID': inv.vendorId || '',\n  'PO Number': inv.poNumber || '',\n  'Invoice Date': inv.invoiceDate || undefined,\n  'Due Date': inv.dueDate || undefined,\n  'Currency': inv.currency || undefined,\n  'Net Amount': inv.netAmount ?? undefined,\n  'Tax Amount': inv.taxAmount ?? undefined,\n  'Gross Amount': inv.grossAmount ?? undefined,\n  'Tax Rate Pct': inv.taxRatePct ?? undefined,\n  'Line Items JSON': JSON.stringify(inv.lineItems || [], null, 2),\n  'Purchase Order Match': noMatch ? 'No Match' : (eng.severity === 'none' ? 'Matched' : 'Partial'),\n  'Field Comparisons': JSON.stringify(eng.fieldComparisons || [], null, 2),\n  'Discrepancy Summary': (eng.discrepancies || [])\n      .map(d => `[${d.severity}] ${d.type}: ${d.message}`).join('\\n') || 'None',\n  'Discrepancy Severity': eng.severity === 'none' ? 'None' : (eng.severity === 'minor' ? 'Minor' : 'Major'),\n  'Confidence Score': inv.confidenceScore ?? undefined,\n  'Extraction Warnings': (inv.extractionWarnings || []).join('\\n'),\n  'Validation Status': eng.validationStatus,\n  'Approval Decision': 'Pending',\n  'Sender Email': meta.senderEmail || undefined,\n  'Email Subject': meta.subject || '',\n  'Received At': meta.receivedAt || undefined,\n  'Raw AI JSON': ctx.rawAi || '',\n};\nObject.keys(fields).forEach(k => fields[k] === undefined && delete fields[k]);\nreturn { json: { fields, matchSummary: eng.matchSummary, validationStatus: eng.validationStatus } };"
+      },
+      "position": [
+        3360,
+        300
+      ],
+      "id": "format-airtable-fields"
+    },
+    {
+      "name": "Create Invoice Record",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.airtable.com/v0/appAcDIn6VkCTnRKW/Invoices",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "airtableTokenApi",
+        "options": {},
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ records: [{ fields: $json.fields }], typecast: true }) }}"
+      },
+      "position": [
+        3600,
+        300
+      ],
+      "id": "create-invoice-record",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "name": "Upload PDF Attachment",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "POST",
+        "url": "=https://content.airtable.com/v0/appAcDIn6VkCTnRKW/{{ $json.records[0].id }}/Invoice%20Attachment/uploadAttachment",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "airtableTokenApi",
+        "options": {},
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ contentType: 'application/pdf', filename: $('Email Metadata').item.json.pdfFilename || 'invoice.pdf', file: $('Email Metadata').item.binary.data.data }) }}"
+      },
+      "position": [
+        3840,
+        300
+      ],
+      "id": "upload-pdf-attachment",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "name": "Audit Log Entry",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.airtable.com/v0/appAcDIn6VkCTnRKW/Audit_Log",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "airtableTokenApi",
+        "options": {},
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ records: [{ fields: { 'Entry': ($('Format Airtable Fields').item.json.fields['Invoice Number']) + ' \u00b7 ingested', 'Invoice Number': $('Format Airtable Fields').item.json.fields['Invoice Number'], 'Action': 'Invoice ingested, extracted and validated', 'Actor': 'system:n8n', 'From Status': '-', 'To Status': $('Format Airtable Fields').item.json.validationStatus, 'Timestamp': $now.toISO(), 'Note': $('Format Airtable Fields').item.json.matchSummary } }], typecast: true }) }}"
+      },
+      "position": [
+        4080,
+        300
+      ],
+      "id": "audit-log-entry"
+    },
+    {
+      "name": "Ignored - No PDF",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "parameters": {},
+      "position": [
+        720,
+        520
+      ],
+      "id": "ignored---no-pdf"
+    },
+    {
+      "name": "Needs OCR - Scanned PDF",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "parameters": {},
+      "position": [
+        1200,
+        520
+      ],
+      "id": "needs-ocr---scanned-pdf"
+    },
+    {
+      "name": "Log Duplicate",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.airtable.com/v0/appAcDIn6VkCTnRKW/Audit_Log",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "airtableTokenApi",
+        "options": {},
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ records: [{ fields: { 'Entry': ($('Parse Extraction').item.json.invoice.invoiceNumber || 'UNKNOWN') + ' \u00b7 duplicate skipped', 'Invoice Number': $('Parse Extraction').item.json.invoice.invoiceNumber, 'Action': 'Duplicate invoice detected \u2014 no new record created', 'Actor': 'system:n8n', 'From Status': '-', 'To Status': 'Duplicate', 'Timestamp': $now.toISO(), 'Note': 'An invoice with this number already exists (record ' + (($json.records||[])[0] ? $json.records[0].id : '?') + ').' } }], typecast: true }) }}"
+      },
+      "position": [
+        2160,
+        520
+      ],
+      "id": "log-duplicate"
+    },
+    {
+      "name": "Duplicate Skipped",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "parameters": {},
+      "position": [
+        2400,
+        520
+      ],
+      "id": "duplicate-skipped"
+    }
+  ],
+  "connections": {
+    "Gmail Trigger": {
+      "main": [
+        [
+          {
+            "node": "Email Metadata",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Email Metadata": {
+      "main": [
+        [
+          {
+            "node": "Has PDF?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has PDF?": {
+      "main": [
+        [
+          {
+            "node": "Extract PDF Text",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Ignored - No PDF",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract PDF Text": {
+      "main": [
+        [
+          {
+            "node": "Has Text Layer?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Text Layer?": {
+      "main": [
+        [
+          {
+            "node": "Build OpenAI Request",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Needs OCR - Scanned PDF",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build OpenAI Request": {
+      "main": [
+        [
+          {
+            "node": "OpenAI Extract",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI Extract": {
+      "main": [
+        [
+          {
+            "node": "Parse Extraction",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Extraction": {
+      "main": [
+        [
+          {
+            "node": "Check Duplicate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Duplicate": {
+      "main": [
+        [
+          {
+            "node": "Is Duplicate?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Duplicate?": {
+      "main": [
+        [
+          {
+            "node": "Log Duplicate",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Find PO",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Duplicate": {
+      "main": [
+        [
+          {
+            "node": "Duplicate Skipped",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Find PO": {
+      "main": [
+        [
+          {
+            "node": "Prepare Match Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Match Input": {
+      "main": [
+        [
+          {
+            "node": "Matching Engine",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Matching Engine": {
+      "main": [
+        [
+          {
+            "node": "Format Airtable Fields",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Airtable Fields": {
+      "main": [
+        [
+          {
+            "node": "Create Invoice Record",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Invoice Record": {
+      "main": [
+        [
+          {
+            "node": "Upload PDF Attachment",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upload PDF Attachment": {
+      "main": [
+        [
+          {
+            "node": "Audit Log Entry",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {}
+}

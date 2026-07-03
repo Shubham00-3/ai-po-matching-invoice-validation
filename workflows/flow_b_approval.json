@@ -1,0 +1,177 @@
+{
+  "name": "Flow B - PO Approval Status Updater",
+  "nodes": [
+    {
+      "name": "Every Minute",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 1
+            }
+          ]
+        }
+      },
+      "position": [
+        260,
+        300
+      ],
+      "id": "every-minute"
+    },
+    {
+      "name": "Find Pending Decisions",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "GET",
+        "url": "=https://api.airtable.com/v0/appAcDIn6VkCTnRKW/Invoices?filterByFormula={{ encodeURIComponent('AND(OR({Approval Decision}=\"Approve\",{Approval Decision}=\"Reject\"),{Approval Timestamp}=BLANK())') }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "airtableTokenApi",
+        "options": {}
+      },
+      "position": [
+        520,
+        300
+      ],
+      "id": "find-pending-decisions",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "name": "Split Decisions",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Emit one item per pending-decision record (empty -> flow ends cleanly).\nconst out = [];\nfor (const it of $input.all()) {\n  for (const r of (it.json.records || [])) out.push({ json: r });\n}\nreturn out;"
+      },
+      "position": [
+        780,
+        300
+      ],
+      "id": "split-decisions"
+    },
+    {
+      "name": "Decide Status",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Decide the new status from the reviewer's Approval Decision.\nconst r = $json;\nconst f = r.fields || {};\nconst decision = f['Approval Decision'];\nconst approve = decision === 'Approve';\nconst newStatus = approve ? 'Ready for Payment' : 'Rejected';\nconst now = new Date().toISOString();\n\nconst fields = {\n  'Validation Status': newStatus,\n  'Approval Timestamp': now,\n  'Approved By': f['Approved By'] || 'procurement@demo',\n};\nif (!approve) fields['Rejection Reason'] = f['Rejection Reason'] || 'Rejected by procurement reviewer';\n\nreturn { json: {\n  recordId: r.id,\n  fields,\n  invoiceNumber: f['Invoice Number'] || 'UNKNOWN',\n  fromStatus: f['Validation Status'] || '-',\n  toStatus: newStatus,\n  decision,\n  actor: fields['Approved By'],\n  comments: f['Reviewer Comments'] || '',\n  now,\n} };"
+      },
+      "position": [
+        1040,
+        300
+      ],
+      "id": "decide-status"
+    },
+    {
+      "name": "Update Invoice Status",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "PATCH",
+        "url": "=https://api.airtable.com/v0/appAcDIn6VkCTnRKW/Invoices/{{ $json.recordId }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "airtableTokenApi",
+        "options": {},
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ fields: $json.fields, typecast: true }) }}"
+      },
+      "position": [
+        1300,
+        300
+      ],
+      "id": "update-invoice-status",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "name": "Audit Log Decision",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.airtable.com/v0/appAcDIn6VkCTnRKW/Audit_Log",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "airtableTokenApi",
+        "options": {},
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ records: [{ fields: { 'Entry': $('Decide Status').item.json.invoiceNumber + ' \u00b7 ' + $('Decide Status').item.json.decision.toLowerCase() + 'd', 'Invoice Number': $('Decide Status').item.json.invoiceNumber, 'Action': 'Procurement ' + $('Decide Status').item.json.decision, 'Actor': $('Decide Status').item.json.actor, 'From Status': $('Decide Status').item.json.fromStatus, 'To Status': $('Decide Status').item.json.toStatus, 'Timestamp': $('Decide Status').item.json.now, 'Note': $('Decide Status').item.json.comments } }], typecast: true }) }}"
+      },
+      "position": [
+        1560,
+        300
+      ],
+      "id": "audit-log-decision"
+    }
+  ],
+  "connections": {
+    "Every Minute": {
+      "main": [
+        [
+          {
+            "node": "Find Pending Decisions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Find Pending Decisions": {
+      "main": [
+        [
+          {
+            "node": "Split Decisions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Decisions": {
+      "main": [
+        [
+          {
+            "node": "Decide Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Decide Status": {
+      "main": [
+        [
+          {
+            "node": "Update Invoice Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Invoice Status": {
+      "main": [
+        [
+          {
+            "node": "Audit Log Decision",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {}
+}

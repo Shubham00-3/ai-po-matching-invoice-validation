@@ -1,0 +1,28 @@
+# Self-hosted n8n for reviewers who want to run the workflows locally.
+# Usage: cp .env.example .env  →  fill values  →  docker compose up -d
+# n8n UI: http://localhost:5678  (import workflows/ JSON, connect credentials)
+services:
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: n8n-po-matching
+    restart: unless-stopped
+    ports:
+      - "5678:5678"
+    environment:
+      - N8N_HOST=localhost
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=http
+      - GENERIC_TIMEZONE=Asia/Kolkata
+      - TZ=Asia/Kolkata
+      # Matching-engine tolerances (read via $env in the Code node — see docs/MATCHING_ENGINE.md)
+      - MONEY_REL_TOLERANCE_PCT=${MONEY_REL_TOLERANCE_PCT:-2}
+      - TAX_ABS_TOLERANCE_CENTS=${TAX_ABS_TOLERANCE_CENTS:-2}
+      - TAX_REL_CEILING_CENTS=${TAX_REL_CEILING_CENTS:-500}
+      - TOTAL_ABS_TOLERANCE_CENTS=${TOTAL_ABS_TOLERANCE_CENTS:-2}
+      # NOTE: API keys (OpenAI, Airtable PAT, email) are entered as n8n CREDENTIALS
+      # in the UI — encrypted at rest. They are intentionally NOT passed as env vars.
+    volumes:
+      - n8n_data:/home/node/.n8n
+
+volumes:
+  n8n_data:

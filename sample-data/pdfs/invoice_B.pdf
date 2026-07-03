@@ -1,0 +1,60 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 842] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>
+endobj
+4 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>
+endobj
+5 0 obj
+<< /Length 1183 >>
+stream
+BT
+/F1 9 Tf
+10.8 TL
+36 806 Td
+(HELVETIA PRECISION TOOLS GMBH) Tj T*
+(Industriestrasse 12, 8005 Zürich, Switzerland) Tj T*
+(VAT: DE 811 234 567) Tj T*
+() Tj T*
+(RECHNUNG / INVOICE) Tj T*
+() Tj T*
+(Invoice Number:   HPT-2026-0342) Tj T*
+(Invoice Date:     2026-06-20) Tj T*
+(Due Date:         2026-07-20) Tj T*
+(Purchase Order:   PO-2003) Tj T*
+() Tj T*
+(------------------------------------------------------------------) Tj T*
+(SKU          Description                    Qty   Unit     Amount) Tj T*
+(------------------------------------------------------------------) Tj T*
+(HP-CAL-150   Digital Caliper 150mm           15   78.00    1,170.00) Tj T*
+(HP-MIC-25    Micrometer 0-25mm               10  132.00    1,320.00) Tj T*
+(HP-GAU-SET   Feeler Gauge Set \(32 blades\)    25   14.40      360.00) Tj T*
+(------------------------------------------------------------------) Tj T*
+(                                Net Amount:            2,850.00) Tj T*
+(                                VAT \(19%\):               533.90) Tj T*
+(                                Gross Amount:          3,383.90) Tj T*
+() Tj T*
+(Currency: EUR) Tj T*
+(Remit to IBAN: DE89 3704 0044 0532 0130 00) Tj T*
+ET
+endstream
+endobj
+xref
+0 6
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000115 00000 n 
+0000000241 00000 n 
+0000000309 00000 n 
+trailer
+<< /Size 6 /Root 1 0 R >>
+startxref
+1544
+%%EOF

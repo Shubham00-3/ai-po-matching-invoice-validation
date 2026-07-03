@@ -1,0 +1,13 @@
+# Secrets — never commit real keys
+.env
+.env.*
+!.env.example
+
+# n8n local data (if self-hosting)
+.n8n/
+n8n_data/
+
+# OS / editor
+.DS_Store
+*.log
+node_modules/
