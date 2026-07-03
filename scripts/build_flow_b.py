@@ -106,7 +106,7 @@ nodes = [
     http_airtable("Audit Log Decision", "POST",
         "=https://api.airtable.com/v0/" + BASE_ID + "/Audit_Log",
         ("={{ JSON.stringify({ records: [{ fields: { "
-         "'Entry': $('Decide Status').item.json.invoiceNumber + ' · ' + $('Decide Status').item.json.decision.toLowerCase() + 'd', "
+         "'Entry': $('Decide Status').item.json.invoiceNumber + ' · ' + ($('Decide Status').item.json.decision === 'Approve' ? 'approved' : 'rejected'), "
          "'Invoice Number': $('Decide Status').item.json.invoiceNumber, "
          "'Action': 'Procurement ' + $('Decide Status').item.json.decision, "
          "'Actor': $('Decide Status').item.json.actor, "

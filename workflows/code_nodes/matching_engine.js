@@ -39,6 +39,7 @@ const CONFIG = {
     missing_line_item:          'minor', // on PO, not invoiced — usually a partial delivery
     incorrect_tax_calculation:  'minor', // small tax drift; large drift auto-escalates (see code)
     total_identity_mismatch:    'major', // Net+Tax != Gross by > slack (invoice arithmetic broken)
+    line_total_mismatch:        'major', // a line's stated total != qty × unit price
     invoice_exceeds_po:         'major', // gross invoice > approved PO gross beyond tolerance
     under_billing:              'minor', // invoice below PO value (partial / under-bill)
     missing_data:               'minor', // a required field was null/unreadable — human confirms
@@ -485,6 +486,24 @@ if (CONFIG.REQUIRE_PO_APPROVED) {
   }
 }
 
+// ---- Line-level arithmetic: each line's total must equal quantity × unit price
+// Catches manipulated/incoherent line totals even when qty & unit price look fine.
+coerceLineItems(invoice.lineItems).forEach((li, i) => {
+  const q = toNum(li && li.quantity);
+  const up = toCents(li && li.unitPrice);
+  const lt = toCents(li && li.lineTotal);
+  if (q !== null && up !== null && lt !== null) {
+    const expected = Math.round(q * up);
+    const d = lt - expected;
+    if (Math.abs(d) > CONFIG.TOTAL_ABS_TOLERANCE_CENTS) {
+      pushCmp(`lineItem[#${i}].lineTotal`, centsToStr(lt), centsToStr(expected), false, 'line total != qty x unit');
+      pushDisc(`lineItem[#${i}].lineTotal`, 'line_total_mismatch', lt, expected, d,
+        `Line ${i}: stated total ${centsToStr(lt)} != qty ${q} x unit ${centsToStr(up)} ` +
+        `= ${centsToStr(expected)} (Δ ${centsToStr(d)}).`);
+    }
+  }
+});
+
 // ============================================================================
 // STEP 7 — MONETARY TOTALS (Net + Tax vs PO, gross-vs-gross, identity)
 // ============================================================================
@@ -495,6 +514,19 @@ const poT = resolvePoTotals(po);   // { netCents, grossCents, taxCents }
 
 const isCreditNote = CONFIG.ALLOW_CREDIT_NOTES &&
   ((invNet !== null && invNet < 0) || (invGross !== null && invGross < 0));
+
+// 7.0 REQUIRED-AMOUNT PRESENCE — an invoice with no readable net/total must NEVER
+// auto-approve. Flag missing core amounts so it routes to human review, not payment.
+if (invNet === null) {
+  pushCmp('netAmount', null, centsToStr(poT.netCents), false, 'invoice net amount unreadable');
+  pushDisc('netAmount', 'missing_data', null, poT.netCents, null,
+    'Invoice net amount could not be read from the document; human confirmation required.');
+}
+if (invGross === null) {
+  pushCmp('grossAmount', null, centsToStr(poT.grossCents), false, 'invoice gross/total unreadable');
+  pushDisc('grossAmount', 'missing_data', null, poT.grossCents, null,
+    'Invoice gross/total could not be read from the document; human confirmation required.');
+}
 
 // 7a. Net + Tax == Gross identity (internal consistency of the invoice)
 if (invNet !== null && invTax !== null && invGross !== null) {
@@ -606,7 +638,10 @@ if (invGross !== null && poT.grossCents !== null) {
 // ============================================================================
 {
   const conf = toNum(invoice.confidenceScore);
-  if (conf !== null && conf < CONFIG.CONFIDENCE_FLOOR) {
+  if (conf === null) {
+    pushDisc('confidenceScore', 'low_confidence', null, CONFIG.CONFIDENCE_FLOOR, null,
+      'Extraction did not report a confidence score; human verification advised.');
+  } else if (conf < CONFIG.CONFIDENCE_FLOOR) {
     pushDisc('confidenceScore', 'low_confidence', conf, CONFIG.CONFIDENCE_FLOOR, null,
       `Extraction confidence ${conf} is below floor ${CONFIG.CONFIDENCE_FLOOR}; human verification advised.`);
   }

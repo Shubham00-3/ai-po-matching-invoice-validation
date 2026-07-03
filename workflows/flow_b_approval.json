@@ -104,7 +104,7 @@
         "options": {},
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ records: [{ fields: { 'Entry': $('Decide Status').item.json.invoiceNumber + ' \u00b7 ' + $('Decide Status').item.json.decision.toLowerCase() + 'd', 'Invoice Number': $('Decide Status').item.json.invoiceNumber, 'Action': 'Procurement ' + $('Decide Status').item.json.decision, 'Actor': $('Decide Status').item.json.actor, 'From Status': $('Decide Status').item.json.fromStatus, 'To Status': $('Decide Status').item.json.toStatus, 'Timestamp': $('Decide Status').item.json.now, 'Note': $('Decide Status').item.json.comments } }], typecast: true }) }}"
+        "jsonBody": "={{ JSON.stringify({ records: [{ fields: { 'Entry': $('Decide Status').item.json.invoiceNumber + ' \u00b7 ' + ($('Decide Status').item.json.decision === 'Approve' ? 'approved' : 'rejected'), 'Invoice Number': $('Decide Status').item.json.invoiceNumber, 'Action': 'Procurement ' + $('Decide Status').item.json.decision, 'Actor': $('Decide Status').item.json.actor, 'From Status': $('Decide Status').item.json.fromStatus, 'To Status': $('Decide Status').item.json.toStatus, 'Timestamp': $('Decide Status').item.json.now, 'Note': $('Decide Status').item.json.comments } }], typecast: true }) }}"
       },
       "position": [
         1560,

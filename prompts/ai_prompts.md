@@ -2,6 +2,13 @@
 
 This document defines the two OpenAI prompts used by the n8n workflow.
 
+> **Note:** the production call enforces this schema with **OpenAI Structured
+> Outputs** (`response_format: { type: "json_schema", strict: true }`) — see the
+> `invoice_extraction` schema embedded in `scripts/build_flow_a.py` /
+> `workflows/flow_a_ingest_match.json`. The key names here match that schema
+> exactly (`purchase_order_number`, `confidence_score`, …), so the model is
+> *guaranteed* to return valid, correctly-keyed JSON.
+
 **Design principle (read this first):** The LLM extracts **FACTS ONLY**. It never
 decides whether an invoice passes or fails. All PO matching, discrepancy
 detection, and the Ready-for-Payment / Review / Rejected decision (Steps 4–6)
@@ -53,7 +60,7 @@ object that EXACTLY matches this schema (same keys, same order, same types):
 {
   "vendor_name": string | null,
   "vendor_id": string | null,
-  "po_number": string | null,
+  "purchase_order_number": string | null,
   "invoice_number": string | null,
   "invoice_date": string | null,          // ISO date "YYYY-MM-DD"
   "due_date": string | null,              // ISO date "YYYY-MM-DD"
@@ -71,7 +78,7 @@ object that EXACTLY matches this schema (same keys, same order, same types):
       "line_total": number | null
     }
   ],
-  "confidence": number,                    // 0..1, your confidence in the whole extraction
+  "confidence_score": number,              // 0..1, your confidence in the whole extraction
   "extraction_warnings": string[]          // human-readable notes about anything uncertain
 }
 
@@ -83,12 +90,13 @@ RULES:
   separators. "$1,234.50" -> 1234.5 ; "13%" in tax_rate -> 13.
 - Dates: normalize ANY format to ISO "YYYY-MM-DD" (e.g. "July 2, 2026",
   "02/07/2026", "2026-07-02" all -> "2026-07-02"). If a date is genuinely
-  ambiguous (e.g. 03/04/2026 with no locale cues), pick the most likely reading,
-  keep it as ISO, and add a note to extraction_warnings. If unparseable -> null.
+  ambiguous (e.g. 03/04/2026 with no locale cues), do NOT guess — return null and
+  add a note to extraction_warnings. If unparseable -> null. (In accounts payable,
+  a flagged unknown is safer than a confidently wrong date.)
 - currency: return the ISO 4217 code. Map symbols when unambiguous ($ with a
   US/Canada address, USD/CAD text, €, £). If the symbol is ambiguous (e.g. "$"
   with no country cue), return your best code and add an extraction_warnings note.
-- po_number: capture the purchase order reference exactly as printed (e.g.
+- purchase_order_number: capture the purchase order reference exactly as printed (e.g.
   "PO-10432", "4500091234"). Do not fabricate one. If none is present -> null and
   add a warning "No PO number found on invoice".
 - Line items: one object per billed line. Preserve the vendor's description

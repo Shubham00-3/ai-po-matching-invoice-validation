@@ -142,5 +142,34 @@ invIdent.grossAmount = 3500.00;
 r = run(invIdent, PO_2001);
 expect('identity broken: not clean', r.validationStatus === 'Ready for Payment', false);
 
+// ---- regression tests for the missing-amount / line-total / confidence fixes ----
+
+// all amounts null but vendor/PO/lines match -> must NOT auto-approve
+const invNoAmounts = JSON.parse(JSON.stringify(INV_A));
+invNoAmounts.netAmount = null; invNoAmounts.taxAmount = null; invNoAmounts.grossAmount = null;
+r = run(invNoAmounts, PO_2001);
+expect('missing all amounts: not Ready for Payment', r.validationStatus !== 'Ready for Payment', true);
+expect('missing all amounts: flags missing_data', r.discrepancies.some(d => d.type === 'missing_data'), true);
+
+// missing gross only -> must NOT auto-approve
+const invNoGross = JSON.parse(JSON.stringify(INV_A));
+invNoGross.grossAmount = null;
+r = run(invNoGross, PO_2001);
+expect('missing gross: not Ready for Payment', r.validationStatus !== 'Ready for Payment', true);
+
+// line total inconsistent with qty x unit -> major line_total_mismatch
+const invBadLine = JSON.parse(JSON.stringify(INV_A));
+invBadLine.lineItems[0].lineTotal = 999.00; // qty 40 x 32.50 = 1300, not 999
+r = run(invBadLine, PO_2001);
+expect('bad line total: rejected', r.validationStatus, 'Rejected');
+expect('bad line total: flagged', r.discrepancies.some(d => d.type === 'line_total_mismatch'), true);
+
+// missing confidence score -> not auto-approved (low_confidence minor)
+const invNoConf = JSON.parse(JSON.stringify(INV_A));
+delete invNoConf.confidenceScore;
+r = run(invNoConf, PO_2001);
+expect('missing confidence: not Ready for Payment', r.validationStatus !== 'Ready for Payment', true);
+expect('missing confidence: flags low_confidence', r.discrepancies.some(d => d.type === 'low_confidence'), true);
+
 console.log(failures === 0 ? '\nALL TESTS PASSED' : `\n${failures} FAILURE(S)`);
 process.exit(failures === 0 ? 0 : 1);
